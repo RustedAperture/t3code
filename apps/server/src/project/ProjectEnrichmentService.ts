@@ -18,7 +18,13 @@ import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 const DEFAULT_CACHE_CAPACITY = 512;
 const DEFAULT_MAX_PENDING = 512;
 const DEFAULT_CONCURRENCY = 4;
-const DEFAULT_SUCCESS_TTL = Duration.minutes(1);
+// Matches RepositoryIdentityResolver's own cache, so a shorter TTL here would only rescan
+// favicons. Each expiry re-resolves the root and pushes a metadata refresh to every
+// shell subscriber. Project create, update, and delete invalidate their roots at once.
+const DEFAULT_SUCCESS_TTL = Duration.minutes(15);
+// Matches the resolver's negative TTL, so a folder that gains a repository or a remote
+// (for example after a publish) shows its identity within a minute.
+const NO_REPOSITORY_TTL = Duration.minutes(1);
 const DEFAULT_FAILURE_TTL = Duration.seconds(5);
 
 export interface ProjectEnrichment {
@@ -104,7 +110,12 @@ export const make = Effect.fn("ProjectEnrichmentService.make")(function* (
       capacity: cacheCapacity,
       timeToLive: Exit.match({
         onFailure: () => failureTtl,
-        onSuccess: (result) => (Exit.isSuccess(result) ? successTtl : failureTtl),
+        onSuccess: (result) =>
+          Exit.isFailure(result)
+            ? failureTtl
+            : result.value === null
+              ? NO_REPOSITORY_TTL
+              : successTtl,
       }),
     },
   );

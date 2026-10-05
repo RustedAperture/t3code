@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import { TestClock } from "effect/testing";
 
 import * as ProjectEnrichment from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
@@ -339,5 +340,77 @@ it.effect("deduplicates requests, bounds pending work, and reloads invalidated r
         }),
       ),
     );
+  }),
+);
+
+it.effect("rescans a project only after resolved metadata is 15 minutes old", () =>
+  Effect.gen(function* () {
+    const faviconScans = yield* Ref.make(0);
+    const metadataLayer = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: (workspaceRoot) => Effect.succeed(identity(workspaceRoot)),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        resolvePath: (workspaceRoot) =>
+          Ref.update(faviconScans, (count) => count + 1).pipe(
+            Effect.as(`${workspaceRoot}/favicon.svg`),
+          ),
+      }),
+    );
+
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+      yield* service.getAvailable("/repo");
+      yield* waitForAvailable(service, "/repo", (value) => value.faviconPath !== null);
+
+      // Callers such as the shell stream read projects far more often than this.
+      for (let minute = 1; minute < 15; minute += 1) {
+        yield* TestClock.adjust("1 minute");
+        yield* service.getAvailable("/repo");
+      }
+      assert.equal(yield* Ref.get(faviconScans), 1);
+
+      yield* TestClock.adjust("1 minute");
+      yield* service.getAvailable("/repo");
+      yield* waitForAvailable(service, "/repo", (value) => value.faviconPath !== null);
+      assert.equal(yield* Ref.get(faviconScans), 2);
+    }).pipe(Effect.provide(makeLayer(metadataLayer)));
+  }),
+);
+
+it.effect("picks up a new repository after a minute without rescanning the favicon", () =>
+  Effect.gen(function* () {
+    const hasRepository = yield* Ref.make(false);
+    const faviconScans = yield* Ref.make(0);
+    const metadataLayer = Layer.merge(
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: (workspaceRoot) =>
+          Ref.get(hasRepository).pipe(
+            Effect.map((exists) => (exists ? identity(workspaceRoot) : null)),
+          ),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        resolvePath: () => Ref.update(faviconScans, (count) => count + 1).pipe(Effect.as(null)),
+      }),
+    );
+
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+      yield* service.getAvailable("/folder");
+      yield* waitForAvailable(service, "/folder", (value) => value.repositoryIdentityResolved);
+      assert.equal((yield* service.peek("/folder")).repositoryIdentity, null);
+
+      // For example, the user publishes the folder as a new repository.
+      yield* Ref.set(hasRepository, true);
+      yield* TestClock.adjust("1 minute");
+      yield* service.getAvailable("/folder");
+      const available = yield* waitForAvailable(
+        service,
+        "/folder",
+        (value) => value.repositoryIdentity !== null,
+      );
+      assert.equal(available.repositoryIdentity?.canonicalKey, "example.test/v1/folder");
+      assert.equal(yield* Ref.get(faviconScans), 1);
+    }).pipe(Effect.provide(makeLayer(metadataLayer)));
   }),
 );
