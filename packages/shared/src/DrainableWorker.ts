@@ -34,6 +34,9 @@ export interface DrainableWorker<A> {
  * The worker is forked into the current scope and will be interrupted when
  * the scope closes. A finalizer shuts down the queue.
  *
+ * An item that fails or dies is logged and skipped; the worker keeps
+ * processing later items and `drain` still resolves.
+ *
  * @param process - The effect to run for each queued item.
  * @returns A `DrainableWorker` with `queue` and `drain`.
  */
@@ -45,10 +48,15 @@ export const makeDrainableWorker = <A, E, R>(
     const outstanding = yield* TxRef.make(0);
 
     yield* TxQueue.take(queue).pipe(
-      Effect.tap((a) =>
-        Effect.ensuring(
-          process(a),
-          TxRef.update(outstanding, (n) => n - 1),
+      Effect.flatMap((a) =>
+        // `suspend` turns a `process` that throws while building its effect
+        // into this item's defect instead of the loop's.
+        Effect.suspend(() => process(a)).pipe(
+          // Interrupting the worker fiber (its scope closing) skips this
+          // handler, so only the item's own failure, defect, or interruption
+          // lands here and the loop continues.
+          Effect.catchCause((cause) => Effect.logError("DrainableWorker item failed", cause)),
+          Effect.ensuring(TxRef.update(outstanding, (n) => n - 1)),
         ),
       ),
       Effect.forever,
