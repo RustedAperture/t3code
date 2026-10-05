@@ -343,7 +343,7 @@ it.effect("deduplicates requests, bounds pending work, and reloads invalidated r
   }),
 );
 
-it.effect("rescans a project only after resolved metadata is 15 minutes old", () =>
+it.effect("rescans a favicon only after 15 minutes", () =>
   Effect.gen(function* () {
     const faviconScans = yield* Ref.make(0);
     const metadataLayer = Layer.merge(
@@ -378,39 +378,47 @@ it.effect("rescans a project only after resolved metadata is 15 minutes old", ()
   }),
 );
 
-it.effect("picks up a new repository after a minute without rescanning the favicon", () =>
-  Effect.gen(function* () {
-    const hasRepository = yield* Ref.make(false);
-    const faviconScans = yield* Ref.make(0);
-    const metadataLayer = Layer.merge(
-      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
-        resolve: (workspaceRoot) =>
-          Ref.get(hasRepository).pipe(
-            Effect.map((exists) => (exists ? identity(workspaceRoot) : null)),
-          ),
-      }),
-      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
-        resolvePath: () => Ref.update(faviconScans, (count) => count + 1).pipe(Effect.as(null)),
-      }),
-    );
-
-    yield* Effect.gen(function* () {
-      const service = yield* ProjectEnrichment.ProjectEnrichmentService;
-      yield* service.getAvailable("/folder");
-      yield* waitForAvailable(service, "/folder", (value) => value.repositoryIdentityResolved);
-      assert.equal((yield* service.peek("/folder")).repositoryIdentity, null);
-
-      // For example, the user publishes the folder as a new repository.
-      yield* Ref.set(hasRepository, true);
-      yield* TestClock.adjust("1 minute");
-      yield* service.getAvailable("/folder");
-      const available = yield* waitForAvailable(
-        service,
-        "/folder",
-        (value) => value.repositoryIdentity !== null,
+it.effect(
+  "follows repository identity changes within a minute without rescanning the favicon",
+  () =>
+    Effect.gen(function* () {
+      // 0: no repository yet, then one version per remote.
+      const remoteVersion = yield* Ref.make(0);
+      const faviconScans = yield* Ref.make(0);
+      const metadataLayer = Layer.merge(
+        Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+          resolve: (workspaceRoot) =>
+            Ref.get(remoteVersion).pipe(
+              Effect.map((version) => (version === 0 ? null : identity(workspaceRoot, version))),
+            ),
+        }),
+        Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+          resolvePath: () => Ref.update(faviconScans, (count) => count + 1).pipe(Effect.as(null)),
+        }),
       );
-      assert.equal(available.repositoryIdentity?.canonicalKey, "example.test/v1/folder");
-      assert.equal(yield* Ref.get(faviconScans), 1);
-    }).pipe(Effect.provide(makeLayer(metadataLayer)));
-  }),
+
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectEnrichment.ProjectEnrichmentService;
+        yield* service.getAvailable("/folder");
+        yield* waitForAvailable(service, "/folder", (value) => value.repositoryIdentityResolved);
+        assert.equal((yield* service.peek("/folder")).repositoryIdentity, null);
+
+        // The folder is published as a repository, then its remote moves to another host.
+        for (const version of [1, 2]) {
+          yield* Ref.set(remoteVersion, version);
+          yield* TestClock.adjust("1 minute");
+          yield* service.getAvailable("/folder");
+          const available = yield* waitForAvailable(
+            service,
+            "/folder",
+            (value) => value.repositoryIdentity?.canonicalKey === `example.test/v${version}/folder`,
+          );
+          assert.equal(
+            available.repositoryIdentity?.canonicalKey,
+            `example.test/v${version}/folder`,
+          );
+        }
+        assert.equal(yield* Ref.get(faviconScans), 1);
+      }).pipe(Effect.provide(makeLayer(metadataLayer)));
+    }),
 );

@@ -76,7 +76,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { detectSourceControlProviderFromRemoteUrl } from "@t3tools/shared/sourceControl";
 
 import { AllowGitHubReserve } from "../sourceControl/GitHubCli.ts";
-import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
@@ -638,10 +638,7 @@ export const make = Effect.gen(function* () {
   const pullRequestRefreshes = yield* SubscriptionRef.make(0);
   const registry = yield* PullRequestProviderRegistry.PullRequestProviderRegistry;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  // Plain shells, not ProjectService's enriched ones: enrichment also schedules a favicon
-  // scan per project, and PR sync reads projects every minute. The repository identity comes
-  // from RepositoryIdentityResolver below, which caches it.
-  const projects = yield* ProjectStore.ProjectStoreV2;
+  const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const rateLimits = yield* SourceControlRateLimit.SourceControlRateLimit;
