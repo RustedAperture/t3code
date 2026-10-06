@@ -40,7 +40,7 @@ export interface DrainableWorker<A> {
  * processing later items and `drain` still resolves.
  *
  * @param process - The effect to run for each queued item.
- * @returns A `DrainableWorker` with `queue` and `drain`.
+ * @returns A `DrainableWorker` with `enqueue` and `drain`.
  */
 export const makeDrainableWorker = <A, E, R>(
   process: (item: A) => Effect.Effect<void, E, R>,
@@ -48,7 +48,13 @@ export const makeDrainableWorker = <A, E, R>(
   Effect.gen(function* () {
     const outstanding = yield* TxRef.make(0);
     const queue = yield* Effect.acquireRelease(TxQueue.unbounded<A>(), (queue) =>
-      TxQueue.shutdown(queue).pipe(Effect.andThen(TxRef.set(outstanding, 0)), Effect.tx),
+      // Uncount only the dropped items: an item still running uncounts itself,
+      // even when a parallel scope closes it after this finalizer.
+      TxQueue.clear(queue).pipe(
+        Effect.flatMap((dropped) => TxRef.update(outstanding, (n) => n - dropped.length)),
+        Effect.andThen(TxQueue.shutdown(queue)),
+        Effect.tx,
+      ),
     );
 
     yield* TxQueue.take(queue).pipe(
@@ -56,10 +62,10 @@ export const makeDrainableWorker = <A, E, R>(
         // `suspend` turns a `process` that throws while building its effect
         // into this item's defect instead of the loop's.
         Effect.suspend(() => process(a)).pipe(
-          // Interrupting the worker fiber (its scope closing) skips this
-          // handler, so only the item's own failure, defect, or interruption
-          // lands here and the loop continues. Callers treat an item that only
-          // interrupted itself as cancelled, not failed.
+          // Only the item's own failure, defect, or interruption lands here and
+          // the loop continues; interrupting the worker fiber still stops it.
+          // Callers treat an item that only interrupted itself as cancelled,
+          // not failed.
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause)
               ? Effect.void
