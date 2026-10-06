@@ -106,10 +106,42 @@ function traceSafeExit(exit: Exit.Exit<unknown, unknown>): Exit.Exit<unknown, un
   );
 }
 
+/**
+ * Spans the product tracer may export. The tracer only exists to see T3 Connect
+ * traffic, so it must never ship what the code around a relay call does on the
+ * user's machine (database queries, secret reads, project indexing, process
+ * spawns), even when that work runs inside a relay-traced effect.
+ */
+const RELAY_SPAN_PREFIXES = [
+  "relay.",
+  "clientRuntime.connection.",
+  "clientRuntime.environment.",
+  "clientRuntime.managedRelay",
+  "clientRuntime.authorization.",
+  "environment.",
+  "EnvironmentAuth.",
+  "PairingGrantStore.",
+  "SessionStore.",
+  "ConnectionDriver.",
+  "EnvironmentSupervisor.",
+  "cloud.",
+  "http.client",
+  "web.managedRelayDpopSigner",
+  "mobile.managedRelayDpopSigner",
+] as const;
+
+export function isRelayTraceSpan(name: string): boolean {
+  return RELAY_SPAN_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
 function nonInterferingTracer(delegate: Tracer.Tracer): Tracer.Tracer {
   return Tracer.make({
     span(options) {
-      const span = delegate.span(options);
+      // A local span is never handed to the exporter, but it keeps its
+      // sampling decision so a relay call nested inside it is still exported.
+      const span = isRelayTraceSpan(options.name)
+        ? delegate.span(options)
+        : new Tracer.NativeSpan(options);
       const end = span.end.bind(span);
       span.end = (endTime, exit) => {
         try {

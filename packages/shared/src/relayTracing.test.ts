@@ -100,4 +100,43 @@ describe("withRelayClientTracing", () => {
       ),
     );
   });
+
+  it.effect("never exports local work that runs inside a relay call", () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
+    const layerHttpClient = FetchHttpClient.layer.pipe(
+      Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchFn)),
+    );
+    const layerTracing = RelayTracing.layer(
+      {
+        tracesUrl: "https://api.axiom.test/v1/traces",
+        tracesDataset: "relay-traces",
+        tracesToken: "public-ingest-token",
+      },
+      { serviceName: "relay-test", runtime: "test", client: "test" },
+    ).pipe(Layer.provide(layerHttpClient));
+    const layerTracedApplication = Layer.effectDiscard(
+      Effect.void.pipe(
+        Effect.withSpan("relay.nested-call"),
+        Effect.withSpan("sql.execute"),
+        Effect.andThen(Effect.void.pipe(Effect.withSpan("ServerSecretStore.get"))),
+        Effect.withSpan("environment.orchestration.threadSnapshot"),
+        withRelayClientTracing,
+      ),
+    ).pipe(Layer.provide(layerTracing));
+
+    return Layer.build(layerTracedApplication).pipe(
+      Effect.scoped,
+      Effect.andThen(
+        Effect.sync(() => {
+          const payload = fetchFn.mock.calls
+            .map((call) => new TextDecoder().decode(call[1]?.body as Uint8Array))
+            .join("\n");
+          expect(payload).toContain("environment.orchestration.threadSnapshot");
+          expect(payload).toContain("relay.nested-call");
+          expect(payload).not.toContain("sql.execute");
+          expect(payload).not.toContain("ServerSecretStore.get");
+        }),
+      ),
+    );
+  });
 });
