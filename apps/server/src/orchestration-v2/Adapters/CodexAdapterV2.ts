@@ -1699,12 +1699,23 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
               return;
             }
 
-            yield* client.request("initialize", {
-              // Codex uses the client name as the request originator, so sessions
-              // identify themselves exactly like the provider probe.
-              clientInfo: buildCodexInitializeParams().clientInfo,
-              capabilities: CODEX_CLIENT_CAPABILITIES,
-            });
+            yield* client
+              .request("initialize", {
+                // Codex uses the client name as the request originator, so sessions
+                // identify themselves exactly like the provider probe.
+                clientInfo: buildCodexInitializeParams().clientInfo,
+                capabilities: CODEX_CLIENT_CAPABILITIES,
+              })
+              .pipe(
+                Effect.catchTags({
+                  // A caller interrupted after its `initialize` reached Codex
+                  // leaves the app-server initialized but the flag unset.
+                  CodexAppServerRequestError: (error) =>
+                    error.code === -32600 && error.errorMessage === "Already initialized"
+                      ? Effect.void
+                      : Effect.fail(error),
+                }),
+              );
             yield* client.notify("initialized", undefined);
             yield* Ref.set(initialized, true);
           }),
