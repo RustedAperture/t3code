@@ -796,8 +796,8 @@ export const layer: Layer.Layer<
         }
         yield* input.refreshAfterTurn;
       }).pipe(
-        // Unsubscribe before waiting for storage so provider output cannot
-        // accumulate in the manager's event queue during terminal retries.
+        // Failed and interrupted runs can release their subscription before
+        // retrying. Completed runs must retain late background completions.
         Effect.tapError((error) =>
           isStorageFullError(error) ? (input.onStorageFull ?? Effect.void) : Effect.void,
         ),
@@ -1002,7 +1002,8 @@ export const layer: Layer.Layer<
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
                 refreshAfterTurn,
-                onStorageFull: eventSubscription.close,
+                onStorageFull:
+                  terminal.status === "completed" ? Effect.void : eventSubscription.close,
               }).pipe(
                 Effect.mapError(
                   (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),

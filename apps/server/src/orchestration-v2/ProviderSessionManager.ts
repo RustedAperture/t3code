@@ -1362,7 +1362,9 @@ export const layerWithOptions = (
         >,
       ): Effect.Effect<ProviderAdapterV2EventSubscription> =>
         Effect.gen(function* () {
-          const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
+          // A paused persistence consumer must keep completion events without
+          // growing its queue indefinitely. Suspend publication at capacity.
+          const queue = yield* Queue.bounded<ProviderSessionEventSignal, Cause.Done>(512);
           const subscriberId = yield* Ref.getAndUpdate(nextSubscriberId, (value) => value + 1);
           yield* Ref.update(subscribers, (current) => {
             const updated = new Map(current);

@@ -976,6 +976,81 @@ it.effect("ProviderSessionManagerV2 closes event subscriptions normally on serve
   }),
 );
 
+it.effect(
+  "ProviderSessionManagerV2 releases a full subscriber without losing another subscriber's terminal",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-full-subscription");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const paused = yield* runtime.subscribeEvents!;
+        const active = yield* runtime.subscribeEvents!;
+        const prefixDelivered = yield* Deferred.make<void>();
+        const received = yield* Ref.make(0);
+        const collected = yield* active.events.pipe(
+          Stream.tap(() =>
+            Ref.updateAndGet(received, (count) => count + 1).pipe(
+              Effect.flatMap((count) =>
+                count === 512 ? Deferred.succeed(prefixDelivered, undefined) : Effect.void,
+              ),
+            ),
+          ),
+          Stream.take(513),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(adapterQueue);
+        const terminal: ProviderAdapterV2Event = {
+          type: "turn.terminal",
+          driver: CODEX_DRIVER,
+          providerThreadId: idAllocator.derive.providerThread({
+            driver: CODEX_DRIVER,
+            nativeThreadId: "full-thread",
+          }),
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CODEX_DRIVER,
+            nativeTurnId: "full-turn",
+          }),
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        };
+        yield* Queue.offerAll(adapterQueue!, [
+          ...Array.from({ length: 512 }, () => terminal),
+          { ...terminal, status: "interrupted" },
+        ]);
+        // The paused subscriber fills before the active one gets this prefix.
+        // Closing it must release publication of the terminal queued behind it.
+        yield* Deferred.await(prefixDelivered);
+        yield* paused.close;
+        const events = Array.from(yield* Fiber.join(collected));
+        assert.lengthOf(events, 513);
+        const last = events.at(-1);
+        assert.equal(last?.type === "turn.terminal" ? last.status : null, "interrupted");
+      });
+      yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+    }),
+);
+
 it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);

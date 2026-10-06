@@ -35,6 +35,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -3914,6 +3915,7 @@ function runBackgroundItemScenario(
     >;
     readonly onSubscribe?: Effect.Effect<void>;
     readonly onClose?: Effect.Effect<void>;
+    readonly eventQueue?: Queue.Queue<ProviderAdapterV2Event, Cause.Done>;
     readonly beforeFinalWrite?: (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
     ) => Effect.Effect<void, EventSink.EventSinkV2Error>;
@@ -3986,7 +3988,14 @@ function runBackgroundItemScenario(
           events: Stream.empty,
           subscribeEvents: Effect.gen(function* () {
             yield* options?.onSubscribe ?? Effect.void;
-            const events = Stream.fromIterable(makeEvents(ids));
+            const initialEvents = makeEvents(ids);
+            if (options?.eventQueue !== undefined) {
+              yield* Queue.offerAll(options.eventQueue, initialEvents);
+            }
+            const events =
+              options?.eventQueue === undefined
+                ? Stream.fromIterable(initialEvents)
+                : Stream.fromQueue(options.eventQueue);
             return {
               events:
                 options?.keepEventStreamOpen === true
@@ -3994,6 +4003,10 @@ function runBackgroundItemScenario(
                   : events,
               close: Effect.gen(function* () {
                 yield* options?.onClose ?? Effect.void;
+                if (options?.eventQueue !== undefined) {
+                  yield* Queue.clear(options.eventQueue);
+                  yield* Queue.end(options.eventQueue);
+                }
                 yield* Deferred.succeed(ingestionDone, undefined);
               }),
             };
@@ -4054,19 +4067,28 @@ function runBackgroundItemScenario(
   });
 }
 
-it.effect.each(["terminal", "ingestion"] as const)(
+it.effect.each(["terminal", "ingestion", "completed-background"] as const)(
   "persists the %s result after disk space becomes available",
   (scenario) =>
     Effect.gen(function* () {
       const storageFull = yield* Ref.make(true);
       const subscriptionClosed = yield* Ref.make(false);
+      const eventQueue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
+      const key = `storage-full:${scenario}`;
       const blocked = yield* Deferred.make<void>();
       const persisted = yield* Deferred.make<ReadonlyArray<OrchestrationV2DomainEvent>>();
       const attempts = yield* Ref.make(0);
-      yield* runBackgroundItemScenario(
-        `storage-full:${scenario}`,
-        (ids) => [rootTerminalEvent(ids, "interrupted")],
+      const observed = yield* runBackgroundItemScenario(
+        key,
+        (ids) =>
+          scenario === "completed-background"
+            ? [
+                backgroundTurnItemEvent(ids, "command_execution", "running", 1),
+                rootTerminalEvent(ids, "completed"),
+              ]
+            : [rootTerminalEvent(ids, "interrupted")],
         {
+          eventQueue,
           onClose: Ref.set(subscriptionClosed, true),
           ...(scenario === "ingestion"
             ? {
@@ -4093,16 +4115,35 @@ it.effect.each(["terminal", "ingestion"] as const)(
             yield* Deferred.await(blocked);
             yield* TestClock.adjust("3 seconds");
             assert.isAtLeast(yield* Ref.get(attempts), 2);
-            assert.isTrue(
+            assert.equal(
               yield* Ref.get(subscriptionClosed),
-              "subscription stayed open while terminal persistence retried",
+              scenario !== "completed-background",
+              "only completed runs keep their background completion subscription",
             );
+            if (scenario === "completed-background") {
+              assert.isTrue(
+                yield* Queue.offer(
+                  eventQueue,
+                  backgroundTurnItemEvent(
+                    backgroundScenarioIds(key),
+                    "command_execution",
+                    "completed",
+                    2,
+                  ),
+                ),
+                "background completion must remain queued while storage is full",
+              );
+            }
             yield* Ref.set(storageFull, false);
             yield* TestClock.adjust("1 second");
             const events = yield* Deferred.await(persisted);
             assert.equal(
               events.find((event) => event.type === "run.updated")?.payload.status,
-              scenario === "terminal" ? "interrupted" : "failed",
+              scenario === "terminal"
+                ? "interrupted"
+                : scenario === "completed-background"
+                  ? "waiting"
+                  : "failed",
             );
             if (scenario === "ingestion") {
               const failure = events.find(
@@ -4114,6 +4155,9 @@ it.effect.each(["terminal", "ingestion"] as const)(
           }),
         },
       );
+      if (scenario === "completed-background") {
+        assert.deepEqual(observed, ["turn_item:running", "root-finalized", "turn_item:completed"]);
+      }
     }),
 );
 
