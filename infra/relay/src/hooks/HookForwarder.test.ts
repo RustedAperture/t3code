@@ -188,8 +188,6 @@ function makeHarness(options: Harness = {}) {
           HttpServerRequest.HttpServerRequest,
           HttpServerRequest.fromWeb(request),
         ),
-        // A handler failure still fails this effect after its response has been sent.
-        Effect.exit,
       );
       return yield* Deferred.await(sent);
     });
