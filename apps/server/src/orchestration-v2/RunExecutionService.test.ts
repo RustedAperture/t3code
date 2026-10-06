@@ -3913,6 +3913,7 @@ function runBackgroundItemScenario(
       ReadonlyArray<{ readonly id: TurnItemId; readonly runId: RunId }>
     >;
     readonly onSubscribe?: Effect.Effect<void>;
+    readonly onClose?: Effect.Effect<void>;
     readonly beforeFinalWrite?: (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
     ) => Effect.Effect<void, EventSink.EventSinkV2Error>;
@@ -3991,7 +3992,10 @@ function runBackgroundItemScenario(
                 options?.keepEventStreamOpen === true
                   ? events.pipe(Stream.concat(Stream.never))
                   : events,
-              close: Deferred.succeed(ingestionDone, undefined),
+              close: Effect.gen(function* () {
+                yield* options?.onClose ?? Effect.void;
+                yield* Deferred.succeed(ingestionDone, undefined);
+              }),
             };
           }),
           startTurn: () => Effect.void,
@@ -4055,6 +4059,7 @@ it.effect.each(["terminal", "ingestion"] as const)(
   (scenario) =>
     Effect.gen(function* () {
       const storageFull = yield* Ref.make(true);
+      const subscriptionClosed = yield* Ref.make(false);
       const blocked = yield* Deferred.make<void>();
       const persisted = yield* Deferred.make<ReadonlyArray<OrchestrationV2DomainEvent>>();
       const attempts = yield* Ref.make(0);
@@ -4062,6 +4067,7 @@ it.effect.each(["terminal", "ingestion"] as const)(
         `storage-full:${scenario}`,
         (ids) => [rootTerminalEvent(ids, "interrupted")],
         {
+          onClose: Ref.set(subscriptionClosed, true),
           ...(scenario === "ingestion"
             ? {
                 beforeIngest: new ProviderEventIngestor.ProviderEventPublishError({
@@ -4087,6 +4093,10 @@ it.effect.each(["terminal", "ingestion"] as const)(
             yield* Deferred.await(blocked);
             yield* TestClock.adjust("3 seconds");
             assert.isAtLeast(yield* Ref.get(attempts), 2);
+            assert.isTrue(
+              yield* Ref.get(subscriptionClosed),
+              "subscription stayed open while terminal persistence retried",
+            );
             yield* Ref.set(storageFull, false);
             yield* TestClock.adjust("1 second");
             const events = yield* Deferred.await(persisted);

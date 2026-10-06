@@ -568,6 +568,7 @@ export const layer: Layer.Layer<
       readonly terminal: ProviderTerminalEvent;
       readonly failureItemPersisted: boolean;
       readonly refreshAfterTurn: Effect.Effect<void>;
+      readonly onStorageFull?: Effect.Effect<void>;
       readonly writeIfRunCurrent?: {
         readonly activeAttemptId: RunAttemptId;
         readonly expectedStatus: OrchestrationV2Run["status"];
@@ -795,6 +796,11 @@ export const layer: Layer.Layer<
         }
         yield* input.refreshAfterTurn;
       }).pipe(
+        // Unsubscribe before waiting for storage so provider output cannot
+        // accumulate in the manager's event queue during terminal retries.
+        Effect.tapError((error) =>
+          isStorageFullError(error) ? (input.onStorageFull ?? Effect.void) : Effect.void,
+        ),
         // Keep the terminal write retryable after disk exhaustion instead of
         // losing the result. Provider work is never restarted by this retry.
         Effect.retry({ while: isStorageFullError, schedule: Schedule.spaced("1 second") }),
@@ -996,6 +1002,7 @@ export const layer: Layer.Layer<
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
                 refreshAfterTurn,
+                onStorageFull: eventSubscription.close,
               }).pipe(
                 Effect.mapError(
                   (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
@@ -1323,6 +1330,7 @@ export const layer: Layer.Layer<
                                         ),
                                         failureItemPersisted: false,
                                         refreshAfterTurn,
+                                        onStorageFull: eventSubscription.close,
                                       }),
                                     ),
                                   ),
