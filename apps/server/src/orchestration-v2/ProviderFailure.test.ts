@@ -20,7 +20,7 @@ import {
 import * as IdAllocator from "./IdAllocator.ts";
 import { ContextHandoffBudgetError } from "./ContextHandoffDelivery.ts";
 import { ProviderAdapterTurnStartError } from "./ProviderAdapter.ts";
-import { SqlError, classifySqliteError } from "effect/unstable/sql/SqlError";
+import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 import { isStorageFullError } from "./StorageFailure.ts";
 
 it("explains disk exhaustion through provider, platform and SQLite errors", () => {
