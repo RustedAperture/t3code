@@ -13,7 +13,18 @@ export const TrimmedString = Schema.String.pipe(
     }),
   ),
 );
-export const TrimmedNonEmptyString = TrimmedString.check(Schema.isNonEmpty());
+/**
+ * Non-empty once trimmed. A `TrimmedString` only trims when decoding or
+ * encoding, so `make` and encode see the untrimmed value: a plain
+ * `isNonEmpty` would accept `" "` there and encode it to `""`, which no
+ * longer decodes.
+ */
+const isNonBlank = Schema.makeFilter((value: string) => value.trim().length > 0, {
+  expected: "a non-blank string",
+  toJsonSchema: () => [{ minLength: 1 }, true],
+  arbitraryConstraint: { minLength: 1 },
+});
+export const TrimmedNonEmptyString = TrimmedString.check(isNonBlank);
 
 export const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
