@@ -61,7 +61,6 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
-import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerConfig from "../config.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
@@ -1590,14 +1589,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return path.join(logsDir, `${threadPart}_${toSafeTerminalId(terminalId)}.log`);
   };
 
-  // History is rewritten whole on every persist, so a replace keeps the last
-  // complete copy if the server dies or is interrupted mid-write.
-  const writeHistoryFile = (filePath: string, contents: string) =>
-    writeFileStringAtomically({ filePath, contents }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-    );
-
   const legacyHistoryPath = (threadId: string) =>
     path.join(logsDir, `${legacySafeThreadId(threadId)}.log`);
 
@@ -1737,15 +1728,17 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return;
       }
 
-      yield* writeHistoryFile(historyPath(threadId, terminalId), request.history.value()).pipe(
-        Effect.catch((error) =>
-          Effect.logWarning("failed to persist terminal history", {
-            threadId,
-            terminalId,
-            error,
-          }),
-        ),
-      );
+      yield* fileSystem
+        .writeFileString(historyPath(threadId, terminalId), request.history.value())
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to persist terminal history", {
+              threadId,
+              terminalId,
+              error,
+            }),
+          ),
+        );
     }),
   });
 
@@ -1826,12 +1819,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       const history = new BoundedTerminalHistory(historyLineLimit, raw, historyByteLimit);
       const capped = history.value();
       if (truncated || capped !== raw) {
-        yield* writeHistoryFile(nextPath, capped).pipe(
-          Effect.mapError(
-            (cause) =>
-              new TerminalHistoryError({ operation: "truncate", threadId, terminalId, cause }),
-          ),
-        );
+        yield* fileSystem
+          .writeFileString(nextPath, capped)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new TerminalHistoryError({ operation: "truncate", threadId, terminalId, cause }),
+            ),
+          );
       }
       return history;
     }
@@ -1862,11 +1857,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
     const history = new BoundedTerminalHistory(historyLineLimit, raw, historyByteLimit);
     const capped = history.value();
-    yield* writeHistoryFile(nextPath, capped).pipe(
-      Effect.mapError(
-        (cause) => new TerminalHistoryError({ operation: "migrate", threadId, terminalId, cause }),
-      ),
-    );
+    yield* fileSystem
+      .writeFileString(nextPath, capped)
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new TerminalHistoryError({ operation: "migrate", threadId, terminalId, cause }),
+        ),
+      );
     yield* fileSystem.remove(legacyPath, { force: true }).pipe(
       Effect.catch((cleanupError) =>
         Effect.logWarning("failed to remove legacy terminal history", {
